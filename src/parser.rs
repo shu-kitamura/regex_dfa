@@ -179,8 +179,7 @@ mod tests {
         let expect: Ast = Ast::Char('a');
 
         // 長さ 1 の配列を準備
-        let mut seq: Vec<Ast> = Vec::new();
-        seq.push(Ast::Char('a'));
+        let seq: Vec<Ast> = vec![Ast::Char('a')];
         let actual: Ast = fold_or(seq).unwrap();
         assert_eq!(actual, expect);
     }
