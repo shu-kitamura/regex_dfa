@@ -1,6 +1,6 @@
 //! 正規表現の式をパースするための型・関数  
 //! 式をパースして、抽象構文木(Ast)に変換する。  
-//! "abc(def|ghi)"" が入力された場合、以下の Ast に変換する  
+//! "abc(def|ghi)" が入力された場合、以下の Ast に変換する  
 //!
 //! ```text
 //! Seq(
@@ -24,19 +24,18 @@
 
 use std::mem::take;
 
+use crate::error::ParseError;
+
 // エスケープ文字を定義
-const ESCAPE_CHARS: [char; 8] = ['\\', '(', ')', '|', '+', '*', '?', '.'];
+const ESCAPE_CHARS: [char; 5] = ['\\', '(', ')', '|', '*'];
 
 /// Ast の型
 #[derive(Debug, PartialEq)]
 pub enum Ast {
-    AnyChar,                // '.'に対応する型
-    Char(char),             // 通常の文字に対応する型
-    Plus(Box<Ast>),         // '+'に対応する型
-    Star(Box<Ast>),         // '*'に対応する型
-    Question(Box<Ast>),     // '?'に対応する型
-    Or(Box<Ast>, Box<Ast>), // '|'に対応する型
-    Seq(Vec<Ast>),          // 連結に対応する型
+    Char(char),             // 文字
+    Star(Box<Ast>),         // 繰り返し(*)
+    Or(Box<Ast>, Box<Ast>), // 選択(|)
+    Seq(Vec<Ast>),          // 連接
 }
 
 /// エスケープ文字から Ast を生成
@@ -45,16 +44,6 @@ fn parse_escape(pos: usize, c: char) -> Result<Ast, ParseError> {
         Ok(Ast::Char(c))
     } else {
         Err(ParseError::InvalidEscape(pos, c))
-    }
-}
-
-/// `+`,`*`,`?`から Ast を生成
-fn parse_qualifier(qualifier: char, prev: Ast) -> Ast {
-    match qualifier {
-        '+' => Ast::Plus(Box::new(prev)),
-        '*' => Ast::Star(Box::new(prev)),
-        '?' => Ast::Question(Box::new(prev)),
-        _ => unreachable!(), // 呼び出し方から、到達しないことが確定している
     }
 }
 
@@ -95,22 +84,15 @@ pub fn parse(pattern: &str) -> Result<Ast, ParseError> {
     for (pos, c) in pattern.chars().enumerate() {
         if is_escape {
             is_escape = false;
-            match parse_escape(pos, c) {
-                Ok(ast) => {
-                    seq.push(ast);
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
+            seq.push(parse_escape(pos, c)?);
+            continue;
         }
+
         match c {
             '*' => {
-                if let Some(prev_ast) = seq.pop() {
-                    let ast: Ast = Ast::Star(Box::new(prev_ast));
-                    seq.push(ast);
-                } else {
-                    return Err(ParseError::NoPrev(pos));
-                }
+                let prev_ast = seq.pop().ok_or(ParseError::NoPrev(pos))?;
+                let ast: Ast = Ast::Star(Box::new(prev_ast));
+                seq.push(ast);
             }
             '(' => {
                 let prev: Vec<Ast> = take(&mut seq);
@@ -118,20 +100,17 @@ pub fn parse(pattern: &str) -> Result<Ast, ParseError> {
                 stack.push((prev, prev_or));
             }
             ')' => {
-                if let Some((mut prev, prev_or)) = stack.pop() {
-                    if !seq.is_empty() {
-                        seq_or.push(Ast::Seq(seq));
-                    }
-
-                    if let Some(ast) = fold_or(seq_or) {
-                        prev.push(ast);
-                    }
-
-                    seq = prev;
-                    seq_or = prev_or;
-                } else {
-                    return Err(ParseError::InvalidRightParen(pos));
+                let (mut prev, prev_or) = stack.pop().ok_or(ParseError::InvalidRightParen(pos))?;
+                if !seq.is_empty() {
+                    seq_or.push(Ast::Seq(seq));
                 }
+
+                if let Some(ast) = fold_or(seq_or) {
+                    prev.push(ast);
+                }
+
+                seq = prev;
+                seq_or = prev_or;
             }
             '|' => {
                 let prev: Vec<Ast> = take(&mut seq);
@@ -159,32 +138,11 @@ pub fn parse(pattern: &str) -> Result<Ast, ParseError> {
     }
 }
 
-use thiserror::Error;
-
-/// パースエラーを表す型
-///
-/// 正規表現パターンの解析（パース）中に発生するエラーを表現する
-/// 各エラーケースは、入力されたパターンのどの部分でどのような問題があったかを示すために、
-/// 位置情報や不正な文字などの補足情報を含む。
-#[derive(Debug, Error, PartialEq)]
-pub enum ParseError {
-    #[error("ParseError: invalid escape : position = {0}, character = '{1}'")]
-    InvalidEscape(usize, char),
-    #[error("ParseError: invalid right parenthesis : position = {0}")]
-    InvalidRightParen(usize),
-    #[error("ParseError: no previous expression : position = {0}")]
-    NoPrev(usize),
-    #[error("ParseError: no right parenthesis")]
-    NoRightParen,
-    #[error("ParseError: empty expression")]
-    Empty,
-}
-
 // ----- テストコード・試し -----
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::{fold_or, parse, parse_escape, Ast, ParseError};
+    use crate::parser::{Ast, ParseError, fold_or, parse, parse_escape};
 
     #[test]
     fn test_parse_escape_success() {
@@ -288,7 +246,6 @@ mod tests {
 
         assert_eq!(actual, expect);
     }
-
 
     #[test]
     fn test_parse_contain_escape() {
