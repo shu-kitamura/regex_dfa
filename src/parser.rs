@@ -1,222 +1,341 @@
-use std::collections::HashSet;
+//! 正規表現の式をパースするための型・関数  
+//! 式をパースして、抽象構文木(Ast)に変換する。  
+//! "abc(def|ghi)"" が入力された場合、以下の Ast に変換する  
+//!
+//! ```text
+//! Seq(
+//!     Char(a),
+//!     Char(b),
+//!     Char(c),
+//!     Or(
+//!         Seq(
+//!             Char(d),
+//!             Char(e),
+//!             Char(f)
+//!         ),
+//!         Seq(
+//!             Char(g),
+//!             Char(h),
+//!             Char(i)
+//!         )
+//!     )
+//! )
+//! ```
 
-use crate::{automaton::{NfaContext, Nfa}, lexer::{Lexer, Token}};
+use std::mem::take;
 
+// エスケープ文字を定義
+const ESCAPE_CHARS: [char; 8] = ['\\', '(', ')', '|', '+', '*', '?', '.'];
 
+/// Ast の型
+#[derive(Debug, PartialEq)]
+pub enum Ast {
+    AnyChar,                // '.'に対応する型
+    Char(char),             // 通常の文字に対応する型
+    Plus(Box<Ast>),         // '+'に対応する型
+    Star(Box<Ast>),         // '*'に対応する型
+    Question(Box<Ast>),     // '?'に対応する型
+    Or(Box<Ast>, Box<Ast>), // '|'に対応する型
+    Seq(Vec<Ast>),          // 連結に対応する型
+}
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub enum Node {
-    Character(char),
+/// エスケープ文字から Ast を生成
+fn parse_escape(pos: usize, c: char) -> Result<Ast, ParseError> {
+    if ESCAPE_CHARS.contains(&c) {
+        Ok(Ast::Char(c))
+    } else {
+        Err(ParseError::InvalidEscape(pos, c))
+    }
+}
+
+/// `+`,`*`,`?`から Ast を生成
+fn parse_qualifier(qualifier: char, prev: Ast) -> Ast {
+    match qualifier {
+        '+' => Ast::Plus(Box::new(prev)),
+        '*' => Ast::Star(Box::new(prev)),
+        '?' => Ast::Question(Box::new(prev)),
+        _ => unreachable!(), // 呼び出し方から、到達しないことが確定している
+    }
+}
+
+/// `|` を含む式から Ast を生成
+///
+/// 入力されたAstが [Ast1, Ast2, Ast3] の場合、以下の Ast を生成する
+/// ```text
+/// Ast::Or(
+///     Ast1,
+///     Ast::Or(
+///         Ast2,
+///         Ast3
+///     )
+/// )
+/// ```
+///
+fn fold_or(mut seq_or: Vec<Ast>) -> Option<Ast> {
+    if seq_or.len() > 1 {
+        let mut ast: Ast = seq_or.pop().unwrap();
+        // Ast を逆順で結合するため、reverse メソッドを呼び出す
+        seq_or.reverse();
+        for s in seq_or {
+            ast = Ast::Or(Box::new(s), Box::new(ast));
+        }
+        Some(ast)
+    } else {
+        seq_or.pop()
+    }
+}
+
+/// 式をパースし、Astを生成
+pub fn parse(pattern: &str) -> Result<Ast, ParseError> {
+    let mut seq: Vec<Ast> = Vec::new();
+    let mut seq_or: Vec<Ast> = Vec::new();
+    let mut stack: Vec<(Vec<Ast>, Vec<Ast>)> = Vec::new();
+    let mut is_escape: bool = false;
+
+    for (pos, c) in pattern.chars().enumerate() {
+        if is_escape {
+            is_escape = false;
+            match parse_escape(pos, c) {
+                Ok(ast) => {
+                    seq.push(ast);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+        }
+        match c {
+            '*' => {
+                if let Some(prev_ast) = seq.pop() {
+                    let ast: Ast = Ast::Star(Box::new(prev_ast));
+                    seq.push(ast);
+                } else {
+                    return Err(ParseError::NoPrev(pos));
+                }
+            }
+            '(' => {
+                let prev: Vec<Ast> = take(&mut seq);
+                let prev_or: Vec<Ast> = take(&mut seq_or);
+                stack.push((prev, prev_or));
+            }
+            ')' => {
+                if let Some((mut prev, prev_or)) = stack.pop() {
+                    if !seq.is_empty() {
+                        seq_or.push(Ast::Seq(seq));
+                    }
+
+                    if let Some(ast) = fold_or(seq_or) {
+                        prev.push(ast);
+                    }
+
+                    seq = prev;
+                    seq_or = prev_or;
+                } else {
+                    return Err(ParseError::InvalidRightParen(pos));
+                }
+            }
+            '|' => {
+                let prev: Vec<Ast> = take(&mut seq);
+                seq_or.push(Ast::Seq(prev));
+            }
+            '\\' => is_escape = true,
+            _ => seq.push(Ast::Char(c)),
+        };
+    }
+    // 閉じカッコが足りないエラー
+    if !stack.is_empty() {
+        return Err(ParseError::NoRightParen);
+    }
+
+    // seq が残っている場合、seq_or に追加
+    if !seq.is_empty() {
+        seq_or.push(Ast::Seq(seq));
+    }
+
+    // 最後に seq_or を fold して、Ast を生成
+    if let Some(ast) = fold_or(seq_or) {
+        Ok(ast)
+    } else {
+        Err(ParseError::Empty)
+    }
+}
+
+use thiserror::Error;
+
+/// パースエラーを表す型
+///
+/// 正規表現パターンの解析（パース）中に発生するエラーを表現する
+/// 各エラーケースは、入力されたパターンのどの部分でどのような問題があったかを示すために、
+/// 位置情報や不正な文字などの補足情報を含む。
+#[derive(Debug, Error, PartialEq)]
+pub enum ParseError {
+    #[error("ParseError: invalid escape : position = {0}, character = '{1}'")]
+    InvalidEscape(usize, char),
+    #[error("ParseError: invalid right parenthesis : position = {0}")]
+    InvalidRightParen(usize),
+    #[error("ParseError: no previous expression : position = {0}")]
+    NoPrev(usize),
+    #[error("ParseError: no right parenthesis")]
+    NoRightParen,
+    #[error("ParseError: empty expression")]
     Empty,
-    Star(Box<Node>),
-    Union(Box<Node>, Box<Node>),
-    Concat(Box<Node>, Box<Node>),
 }
 
-impl Node {
-    pub fn assemble(&self, context: &mut NfaContext) -> Nfa {
-        match self {
-            Node::Character(char) => {
-                let start = context.new_state();
-                let accept = context.new_state();
-                let mut nfa = Nfa::new(start, HashSet::from([accept]));
-                nfa = nfa.add_transition(start, *char, accept);
-                nfa
-            },
-            Node::Empty => {
-                let start = context.new_state();
-                let accept = context.new_state();
-                let mut nfa = Nfa::new(start, HashSet::from([accept]));
-                nfa = nfa.add_empty_transition(start, accept);
-                nfa
-            },
-            Node::Star(node) => {
-                let frag = node.assemble(context);
-                let start = context.new_state();
-                let accepts = frag.accepts.union(&[start].into()).cloned().collect();
-                let mut nfa = Nfa::new(start, accepts)
-                    .merge_transition(&frag)
-                    .add_empty_transition(start, frag.start);
-                for accept in &frag.accepts {
-                    nfa = nfa.add_empty_transition(*accept, frag.start);
-                }
-                nfa
-            },
-            Node::Union(node1, node2) => {
-                let frag1 = node1.assemble(context);
-                let frag2 = node2.assemble(context);
-                let start = context.new_state();
-                let accepts = frag1.accepts.union(&frag2.accepts).cloned().collect();
-                Nfa::new(start, accepts)
-                    .merge_transition(&frag1)
-                    .merge_transition(&frag2)
-                    .add_empty_transition(start, frag1.start)
-                    .add_empty_transition(start, frag2.start)
-            },
-            Node::Concat(node1, node2) => {
-                let frag1 = node1.assemble(context);
-                let frag2 = node2.assemble(context);
-                let mut fragment = 
-                    Nfa::new(frag1.start, frag2.accepts.clone())
-                        .merge_transition(&frag1)
-                        .merge_transition(&frag2);
-                for accept1 in &frag1.accepts {
-                    fragment = fragment.add_empty_transition(*accept1, frag2.start);
-                }
-                fragment
-            }
-        }
-    }
-}
-
-type Result<T> = std::result::Result<T, String>;
-
-pub struct Parser<'a> {
-    lexer: Lexer<'a>,
-    look: Token,
-}
-
-impl Parser<'_> {
-    pub fn new(mut lexer: Lexer) -> Parser {
-        let node = lexer.scan();
-        Parser { lexer, look: node }
-    }
-
-    pub fn parse(&mut self) -> Result<Node> {
-        self.expression()
-    }
-
-    fn match_next(&mut self, token: Token) -> Result<()> {
-        match &self.look {
-            look if *look == token => {
-                self.look = self.lexer.scan();
-                Ok(())
-            }
-            other => Err(error_msg(&[token], *other)),
-        }
-    }
-
-    fn factor(&mut self) -> Result<Node> {
-        match &self.look {
-            Token::LeftParen => {
-                self.match_next(Token::LeftParen)?;
-                let node = self.sub_expression();
-                self.match_next(Token::RightParen)?;
-                node
-            }
-            Token::Character(char) => {
-                let node = Node::Character(*char);
-                self.match_next(Token::Character(*char))?;
-                Ok(node)
-            }
-            other => Err(error_msg(
-                &[Token::LeftParen, Token::Character('_')],
-                *other,
-            )),
-        }
-    }
-
-    fn star(&mut self) -> Result<Node> {
-        let factor = self.factor();
-        match &self.look {
-            Token::StarOperator => {
-                self.match_next(Token::StarOperator)?;
-                Ok(Node::Star(Box::new(factor?)))
-            }
-            _ => factor,
-        }
-    }
-
-    fn sub_sequence(&mut self) -> Result<Node> {
-        let star = self.star();
-        match &self.look {
-            Token::LeftParen | Token::Character(_) => Ok(Node::Concat(
-                Box::new(star?),
-                Box::new(self.sub_sequence()?),
-            )),
-            _ => star,
-        }
-    }
-
-    fn sequence(&mut self) -> Result<Node> {
-        match &self.look {
-            Token::LeftParen | Token::Character(_) => self.sub_sequence(),
-            _ => Ok(Node::Empty),
-        }
-    }
-
-    fn sub_expression(&mut self) -> Result<Node> {
-        let sequence = self.sequence();
-        match &self.look {
-            Token::UnionOperator => {
-                self.match_next(Token::UnionOperator)?;
-                Ok(Node::Union(
-                    Box::new(sequence?),
-                    Box::new(self.sub_expression()?),
-                ))
-            }
-            _ => sequence,
-        }
-    }
-
-    fn expression(&mut self) -> Result<Node> {
-        let expression = self.sub_expression();
-        self.match_next(Token::EndOfFile)?;
-        expression
-    }
-}
-
-fn error_msg(expected: &[Token], actual: Token) -> String {
-    let expected = expected
-        .iter()
-        .map(|token| format!("'{}'", token))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let actual = match actual {
-        Token::Character(char) => format!("'{}'", char),
-        _ => format!("'{}'", actual),
-    };
-    format!("Expected one of [{}], found {}", expected, actual)
-}
-
+// ----- テストコード・試し -----
 
 #[cfg(test)]
 mod tests {
-    use crate::lexer::*;
-    use crate::parser::*;
+    use crate::parser::{fold_or, parse, parse_escape, Ast, ParseError};
 
     #[test]
-    fn expression() {
-        let mut parser = Parser::new(Lexer::new(r"a|(bc)*"));
-        assert_eq!(
-            parser.expression(),
-            Ok(Node::Union(
-                Box::new(Node::Character('a')),
-                Box::new(Node::Star(Box::new(Node::Concat(
-                    Box::new(Node::Character('b')),
-                    Box::new(Node::Character('c'))
-                ))))
-            ))
-        );
+    fn test_parse_escape_success() {
+        let expect: Ast = Ast::Char('\\');
+
+        // テスト対象を実行
+        let actual: Ast = parse_escape(0, '\\').unwrap();
+        assert_eq!(actual, expect);
     }
 
     #[test]
-    fn expression2() {
-        let mut parser = Parser::new(Lexer::new(r"a|"));
-        assert_eq!(
-            parser.expression(),
-            Ok(Node::Union(
-                Box::new(Node::Character('a')),
-                Box::new(Node::Empty)
-            ))
-        );
+    fn test_parse_escape_failure() {
+        let expect = Err(ParseError::InvalidEscape(0, 'a'));
+
+        // テスト対象を実行
+        let actual = parse_escape(0, 'a');
+        assert_eq!(actual, expect);
     }
 
     #[test]
-    fn fail() {
-        let mut parser1 = Parser::new(Lexer::new(r"a("));
-        let mut parser2 = Parser::new(Lexer::new(r"a)"));
-        assert!(parser1.expression().is_err());
-        assert!(parser2.expression().is_err());
+    fn test_fold_or_if_true() {
+        // パターン "a|b|c" を想定し、データ準備
+        let seq: Vec<Ast> = vec![Ast::Char('a'), Ast::Char('b'), Ast::Char('c')];
+
+        // a|b|c をパースした場合、以下のAstができる
+        // Ast::Or(Ast::Char('a'), Ast::Or(Ast::Char('b'), Ast::Char('c')))
+        // 上記のAstを用意するため、データを定義
+        let left: Ast = Ast::Char('a');
+        let right: Ast = Ast::Or(Box::new(Ast::Char('b')), Box::new(Ast::Char('c')));
+        let expect: Ast = Ast::Or(Box::new(left), Box::new(right));
+
+        let actual: Ast = fold_or(seq).unwrap();
+
+        assert_eq!(actual, expect);
+    }
+
+    #[test]
+    fn test_fold_or_if_false() {
+        // 長さ 1 の配列を準備
+        let mut seq: Vec<Ast> = Vec::new();
+        seq.push(Ast::Char('a'));
+
+        let expect: Ast = Ast::Char('a');
+
+        // テスト対象を実行
+        let actual: Ast = fold_or(seq).unwrap();
+
+        assert_eq!(actual, expect);
+    }
+
+    #[test]
+    fn test_parse_normal_string() {
+        // ----- "abc" が入力されたケース -----
+        let expect: Ast = Ast::Seq(vec![Ast::Char('a'), Ast::Char('b'), Ast::Char('c')]);
+        // テスト対象を実行
+        let pattern: &str = "abc";
+        let actual: Ast = parse(pattern).unwrap();
+        assert_eq!(actual, expect);
+    }
+
+    #[test]
+    fn test_parse_contain_or() {
+        // ----- "abc|def|ghi" が入力されたケース-----
+        let abc: Ast = Ast::Seq(vec![Ast::Char('a'), Ast::Char('b'), Ast::Char('c')]);
+        let def: Ast = Ast::Seq(vec![Ast::Char('d'), Ast::Char('e'), Ast::Char('f')]);
+        let ghi: Ast = Ast::Seq(vec![Ast::Char('g'), Ast::Char('h'), Ast::Char('i')]);
+
+        let expect: Ast = Ast::Or(
+            Box::new(abc),
+            Box::new(Ast::Or(Box::new(def), Box::new(ghi))),
+        );
+        // テスト対象を実行
+        let pattern: &str = "abc|def|ghi";
+        let actual: Ast = parse(pattern).unwrap();
+        assert_eq!(actual, expect);
+    }
+
+    #[test]
+    fn test_parse_contain_paran() {
+        // ----- "abc(def|ghi)" が入力されたケース-----
+        let expect: Ast = Ast::Seq(vec![
+            Ast::Char('a'),
+            Ast::Char('b'),
+            Ast::Char('c'),
+            Ast::Or(
+                Box::new(Ast::Seq(vec![
+                    Ast::Char('d'),
+                    Ast::Char('e'),
+                    Ast::Char('f'),
+                ])),
+                Box::new(Ast::Seq(vec![
+                    Ast::Char('g'),
+                    Ast::Char('h'),
+                    Ast::Char('i'),
+                ])),
+            ),
+        ]);
+        // テスト対象を実行
+        let pattern: &str = "abc(def|ghi)";
+        let actual: Ast = parse(pattern).unwrap();
+
+        assert_eq!(actual, expect);
+    }
+
+
+    #[test]
+    fn test_parse_contain_escape() {
+        // ----- "a\*b" が入力されたケース -----
+        let expect: Ast = Ast::Seq(vec![Ast::Char('a'), Ast::Char('*'), Ast::Char('b')]);
+        // テスト対象を実行
+        let pattern: &str = "a\\*b";
+        let actual: Ast = parse(pattern).unwrap();
+        assert_eq!(actual, expect);
+    }
+
+    #[test]
+    fn test_parse_return_err() {
+        // ----- "abc(def|ghi" が入力されたケース -----
+        let expect = Err(ParseError::NoRightParen);
+
+        // テスト対象を実行
+        let pattern: &str = "abc(def|ghi";
+        let actual = parse(pattern);
+        assert_eq!(actual, expect);
+
+        // ----- "abc(def|ghi))" が入力されたケース -----
+        let expect = Err(ParseError::InvalidRightParen(12));
+        // テスト対象を実行
+        let pattern: &str = "abc(def|ghi))";
+        let actual = parse(pattern);
+        assert_eq!(actual, expect);
+
+        // ----- "*abc" が入力されたケース -----
+        let expect = Err(ParseError::NoPrev(0));
+        // テスト対象を実行
+        let pattern: &str = "*abc";
+        let actual = parse(pattern);
+        assert_eq!(actual, expect);
+
+        // ----- "" が入力されたケース -----
+        let expect = Err(ParseError::Empty);
+        // テスト対象を実行
+        let pattern: &str = "";
+        let actual = parse(pattern);
+        assert_eq!(actual, expect);
+
+        // ----- "a\bc" が入力されたケース -----
+        let expect = Err(ParseError::InvalidEscape(2, 'b'));
+        // テスト対象を実行
+        let pattern: &str = "a\\bc";
+        let actual = parse(pattern);
+        assert_eq!(actual, expect);
     }
 }
