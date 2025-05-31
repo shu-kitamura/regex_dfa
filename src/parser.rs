@@ -22,7 +22,7 @@
 //! )
 //! ```
 
-use std::mem::take;
+use std::mem::{take};
 
 use crate::error::ParseError;
 
