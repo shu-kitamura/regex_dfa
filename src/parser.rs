@@ -23,6 +23,7 @@
 //! ```
 
 use std::mem::take;
+use std::io::Error as IoError;
 
 use crate::error::ParseError;
 
