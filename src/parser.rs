@@ -147,8 +147,6 @@ mod tests {
     #[test]
     fn test_parse_escape_success() {
         let expect: Ast = Ast::Char('\\');
-
-        // テスト対象を実行
         let actual: Ast = parse_escape(0, '\\').unwrap();
         assert_eq!(actual, expect);
     }
@@ -156,8 +154,6 @@ mod tests {
     #[test]
     fn test_parse_escape_failure() {
         let expect = Err(ParseError::InvalidEscape(0, 'a'));
-
-        // テスト対象を実行
         let actual = parse_escape(0, 'a');
         assert_eq!(actual, expect);
     }
@@ -175,21 +171,17 @@ mod tests {
         let expect: Ast = Ast::Or(Box::new(left), Box::new(right));
 
         let actual: Ast = fold_or(seq).unwrap();
-
         assert_eq!(actual, expect);
     }
 
     #[test]
     fn test_fold_or_if_false() {
+        let expect: Ast = Ast::Char('a');
+
         // 長さ 1 の配列を準備
         let mut seq: Vec<Ast> = Vec::new();
         seq.push(Ast::Char('a'));
-
-        let expect: Ast = Ast::Char('a');
-
-        // テスト対象を実行
         let actual: Ast = fold_or(seq).unwrap();
-
         assert_eq!(actual, expect);
     }
 
@@ -197,7 +189,6 @@ mod tests {
     fn test_parse_normal_string() {
         // ----- "abc" が入力されたケース -----
         let expect: Ast = Ast::Seq(vec![Ast::Char('a'), Ast::Char('b'), Ast::Char('c')]);
-        // テスト対象を実行
         let pattern: &str = "abc";
         let actual: Ast = parse(pattern).unwrap();
         assert_eq!(actual, expect);
@@ -214,7 +205,6 @@ mod tests {
             Box::new(abc),
             Box::new(Ast::Or(Box::new(def), Box::new(ghi))),
         );
-        // テスト対象を実行
         let pattern: &str = "abc|def|ghi";
         let actual: Ast = parse(pattern).unwrap();
         assert_eq!(actual, expect);
@@ -240,7 +230,6 @@ mod tests {
                 ])),
             ),
         ]);
-        // テスト対象を実行
         let pattern: &str = "abc(def|ghi)";
         let actual: Ast = parse(pattern).unwrap();
 
@@ -251,7 +240,6 @@ mod tests {
     fn test_parse_contain_escape() {
         // ----- "a\*b" が入力されたケース -----
         let expect: Ast = Ast::Seq(vec![Ast::Char('a'), Ast::Char('*'), Ast::Char('b')]);
-        // テスト対象を実行
         let pattern: &str = "a\\*b";
         let actual: Ast = parse(pattern).unwrap();
         assert_eq!(actual, expect);
@@ -261,36 +249,30 @@ mod tests {
     fn test_parse_return_err() {
         // ----- "abc(def|ghi" が入力されたケース -----
         let expect = Err(ParseError::NoRightParen);
-
-        // テスト対象を実行
         let pattern: &str = "abc(def|ghi";
         let actual = parse(pattern);
         assert_eq!(actual, expect);
 
         // ----- "abc(def|ghi))" が入力されたケース -----
         let expect = Err(ParseError::InvalidRightParen(12));
-        // テスト対象を実行
         let pattern: &str = "abc(def|ghi))";
         let actual = parse(pattern);
         assert_eq!(actual, expect);
 
         // ----- "*abc" が入力されたケース -----
         let expect = Err(ParseError::NoPrev(0));
-        // テスト対象を実行
         let pattern: &str = "*abc";
         let actual = parse(pattern);
         assert_eq!(actual, expect);
 
         // ----- "" が入力されたケース -----
         let expect = Err(ParseError::Empty);
-        // テスト対象を実行
         let pattern: &str = "";
         let actual = parse(pattern);
         assert_eq!(actual, expect);
 
         // ----- "a\bc" が入力されたケース -----
         let expect = Err(ParseError::InvalidEscape(2, 'b'));
-        // テスト対象を実行
         let pattern: &str = "a\\bc";
         let actual = parse(pattern);
         assert_eq!(actual, expect);
